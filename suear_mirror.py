@@ -10,6 +10,7 @@
 
 import html
 import http.server
+import math
 import queue
 import socket
 import ssl
@@ -185,15 +186,27 @@ class HttpHandler(http.server.BaseHTTPRequestHandler):
                 frame = suear_client.get_frame()
                 if frame is None:
                     continue
+
+                jpg_data = frame.data
+                # rotate jpeg by angle
+                if frame.angle:
+                    import PIL.Image
+                    import io
+                    img = PIL.Image.open(io.BytesIO(jpg_data))
+                    img = img.rotate(frame.angle+90)
+                    img = img.transpose(PIL.Image.FLIP_LEFT_RIGHT)
+                    img_io = io.BytesIO()
+                    img.save(img_io, format='JPEG')
+                    jpg_data = img_io.getvalue()
                 
                 self.end_headers()
                 self.wfile.write(self.__class__.BOUNDARY)
                 self.end_headers()
-                img_headers = self.__class__.HEADERS_IMAGE(len(frame.data))
+                img_headers = self.__class__.HEADERS_IMAGE(len(jpg_data))
                 for k, v in img_headers.items():
                     self.send_header(k, v)
                 self.end_headers()
-                self.wfile.write(frame.data)
+                self.wfile.write(jpg_data)
                 if self.__class__.RENDER_RATE > 0 and frame.index % self.__class__.RENDER_RATE == 0:
                     frame.render()
                 
@@ -210,25 +223,19 @@ class HttpHandler(http.server.BaseHTTPRequestHandler):
 class JpgFrame:
     BUF_SZ = 131072
     
-    def __init__(self, index=None, width=None, height=None, first_chunk_idx=None, coords=None):
+    def __init__(self, index=None, width=None, height=None, first_chunk_idx=None, angle=None):
         self._buf = bytearray(self.__class__.BUF_SZ)
         if None not in (index, width, height, first_chunk_idx):
-            self.init(index, width, height, first_chunk_idx, coords)
+            self.init(index, width, height, first_chunk_idx, angle)
         return
     
     
-    def init(self, index, width, height, first_chunk_idx, coords=None):
+    def init(self, index, width, height, first_chunk_idx, angle=None):
         self.index = int(index)
         self.width = int(width)
         self.height = int(height)
         self.first_chunk_idx = first_chunk_idx
-        self.x = None
-        self.y = None
-        self.z = None
-        if coords is not None and type(coords) == tuple and len(coords) == 3:
-            self.x = int(coords[0])
-            self.y = int(coords[1])
-            self.z = int(coords[2])
+        self.angle = angle
         self.total = None
         self.complete = False  # True when all chunks have been acquired
         self.chunk_sz = None   # All but the final chunk have the same size
@@ -268,11 +275,8 @@ class JpgFrame:
     
     @property
     def position(self):
-        coords = (self.x, self.y, self.z)
-        if None not in coords:
-            return coords
-        return None
-    
+        return self.angle
+   
     
     def render(self, title=None):
         import matplotlib.pyplot
@@ -391,6 +395,21 @@ class SuearClient:
                     return frame
                 
                 msg = suear_struct.SuearUdpMsg_StreamChunk.from_bytes(data)
+                c_position = bytearray(msg.position)
+
+                # x first 10 bits of c_position
+                # y next 10 bits of c_position
+                x = int(c_position[0] | (c_position[1] & 0b11) << 8)
+                y = int((c_position[1] & 0b11111100) >> 2 | (c_position[2] & 0b1111) << 6)
+
+                # convert to signed
+                if x & 0b1000000000:
+                    x = -(x - 0b1000000000)
+                if y & 0b1000000000:
+                    y = -(y - 0b1000000000)
+
+                angle = math.degrees(math.atan2(x, y))
+
                 read_sz = self.__class__.FRAME_CHUNK_SZ
                 data = buf[offs:offs+read_sz]
                 offs += len(data)
@@ -410,7 +429,7 @@ class SuearClient:
                     self.frame_reserve_idx += 1
                     if self.frame_reserve_idx >= len(self.frame_reserve):
                         self.frame_reserve_idx = 0
-                    parse_frame.init(msg.n_frame, msg.res_width, msg.res_height, msg.n_chunk)
+                    parse_frame.init(msg.n_frame, msg.res_width, msg.res_height, msg.n_chunk, angle)
                     self.frame_dict[msg.n_frame] = parse_frame
                     self.frame_queue.put(parse_frame)
                 
