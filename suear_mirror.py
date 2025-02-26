@@ -258,7 +258,11 @@ class JpgFrame:
             idx += 256
 
         start = self.chunk_sz * (idx - self.first_chunk_idx)
-        self._data[start:start+len(data)] = data
+        try:
+            self._data[start:start+len(data)] = data
+        except ValueError:
+            print(f'Failed to write chunk data to buffer: {start=}  {len(data)=}  {len(self._data)=} {idx=} {self.first_chunk_idx=}')
+            return
         self.acquired_sz += len(data)
         if final:
             self.total = int(final)
